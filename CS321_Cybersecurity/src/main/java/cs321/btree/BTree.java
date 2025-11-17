@@ -8,61 +8,49 @@ import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
 
-
 public class BTree implements BTreeInterface {
 
-    private static final int BLOCK_SIZE = 4096;
-
-
     private static final int METADATA_SIZE = 40;
-
-
+    private static final int KEY_BYTES = 64;
 
     private RandomAccessFile file;
     private final String filename;
 
-
-    private int degree;        // t
-    private int maxKeys;       // 2t - 1
-    private int maxChildren;   // 2t
-    private int nodeSize;      // bytes per node on disk
-
+    private int degree;
+    private int maxKeys;
+    private int maxChildren;
+    private int nodeSize;
 
     private long rootOffset;
     private long nextFreeOffset;
-    private long nodeCount;    // number of nodes in the tree
-    private long size;         // number of distinct keys (TreeObjects)
-    private int height;        // 0 when only root, increases on root splits
+    private long nodeCount;
+    private long size;
+    private int height;
 
-   
     private BTreeNode root;
 
-    // constructor
 
-    
-    // Sets degree to 2 by default
+    // Constructors
+
+
     public BTree(String filename) throws BTreeException {
         this(2, filename);
     }
 
-    // sets degree to passed into value and resets the file
     public BTree(int degree, String filename) throws BTreeException {
         this.filename = filename;
 
         try {
             this.file = new RandomAccessFile(filename, "rw");
-
-            
             file.setLength(0);
 
-            
             int actualDegree;
             if (degree == 0) {
                 actualDegree = calculateOptimalDegree();
             } else if (degree >= 2) {
                 actualDegree = degree;
             } else {
-                throw new BTreeException("Degree must be >= 2 or 0 (auto).");
+                throw new BTreeException("Degree must be >= 2 or 0.");
             }
 
             this.degree = actualDegree;
@@ -70,66 +58,45 @@ public class BTree implements BTreeInterface {
             this.maxChildren = 2 * actualDegree;
             this.nodeSize = computeNodeSize();
 
-           
             this.rootOffset = METADATA_SIZE;
-            this.nextFreeOffset = this.rootOffset;
+            this.nextFreeOffset = rootOffset;
             this.nodeCount = 0;
             this.size = 0;
             this.height = 0;
 
-            
-            this.root = new BTreeNode(true);
-            this.root.offset = this.nextFreeOffset;
-            this.nextFreeOffset += this.nodeSize;
-            this.nodeCount = 1;
+            root = new BTreeNode(true);
+            root.offset = nextFreeOffset;
+            nextFreeOffset += nodeSize;
+            nodeCount = 1;
 
-           
-            diskWrite(this.root);
+            diskWrite(root);
             writeMetadata();
 
         } catch (IOException e) {
-            throw new BTreeException("I/O error in BTree constructor: " + e.getMessage());
+            throw new BTreeException("Error initializing BTree: " + e.getMessage());
         }
     }
 
 
-
-    // getters and setters
-    public long getSize() {
-        return size;
-    }
+    // Basic getters
 
 
-    public int getDegree() {
-        return degree;
-    }
+    public long getSize() { return size; }
+    public int getDegree() { return degree; }
+    public long getNumberOfNodes() { return nodeCount; }
+    public int getHeight() { return height; }
 
 
-    public long getNumberOfNodes() {
-        return nodeCount;
-    }
-
-
-    public int getHeight() {
-        return height;
-    }
-
-
+    // Insert
 
 
     public void insert(TreeObject obj) throws IOException {
-        if (obj == null) {
-            return;
-        }
-        if (root == null) {
-            throw new IllegalStateException("BTree root is not initialized.");
-        }
+        if (obj == null) return;
 
         BTreeNode r = root;
         boolean insertedNewKey;
 
         if (r.numKeys == maxKeys) {
-            // Root is full and then split it
             BTreeNode s = new BTreeNode(false);
             s.offset = nextFreeOffset;
             nextFreeOffset += nodeSize;
@@ -145,140 +112,17 @@ public class BTree implements BTreeInterface {
 
             insertedNewKey = insertNonFull(s, obj);
             diskWrite(s);
+
         } else {
             insertedNewKey = insertNonFull(r, obj);
             diskWrite(r);
         }
 
-        if (insertedNewKey) {
-            size++;
-        }
-
+        if (insertedNewKey) size++;
         writeMetadata();
     }
 
-
-    public TreeObject search(String key) throws IOException {
-        if (root == null || key == null) {
-            return null;
-        }
-        return searchRecursive(root, key);
-    }
-
-
-    public void delete(String key) {
-        // Not implemented 
-    }
-
-
-    public void dumpToFile(PrintWriter out) throws IOException {
-        if (out == null) {
-            return;
-        }
-        if (size == 0 || root == null) {
-            return;
-        }
-        dumpInorderToWriter(rootOffset, out);
-        out.flush();
-    }
-
-
-    public void dumpToDatabase(String dbName, String tableName) throws IOException {
-        if (dbName == null || tableName == null || dbName.isEmpty() || tableName.isEmpty()) {
-            return;
-        }
-        if (size == 0 || root == null) {
-            return;
-        }
-
-        Connection conn = null;
-        Statement stmt = null;
-        PreparedStatement ps = null;
-        try {
-            String url = "jdbc:sqlite:" + dbName;
-            conn = DriverManager.getConnection(url);
-            conn.setAutoCommit(false);
-
-            stmt = conn.createStatement();
-
-            // Drop table if exists, then create new
-            String dropSql = "DROP TABLE IF EXISTS " + tableName;
-            stmt.executeUpdate(dropSql);
-
-            String createSql = "CREATE TABLE " + tableName +
-                    " (key TEXT NOT NULL, frequency INTEGER NOT NULL)";
-            stmt.executeUpdate(createSql);
-
-            String insertSql = "INSERT INTO " + tableName + " (key, frequency) VALUES (?, ?)";
-            ps = conn.prepareStatement(insertSql);
-
-            dumpInorderToDatabase(rootOffset, ps);
-
-            conn.commit();
-
-        } catch (SQLException e) {
-            if (conn != null) {
-                try {
-                    conn.rollback();
-                } catch (SQLException ignore) {}
-            }
-            throw new IOException("Error dumping BTree to database: " + e.getMessage(), e);
-        } finally {
-            if (ps != null) {
-                try { ps.close(); } catch (SQLException ignore) {}
-            }
-            if (stmt != null) {
-                try { stmt.close(); } catch (SQLException ignore) {}
-            }
-            if (conn != null) {
-                try { conn.close(); } catch (SQLException ignore) {}
-            }
-        }
-    }
-
-
-    public String[] getSortedKeyArray() throws IOException {
-        if (size == 0 || root == null) {
-            return new String[0];
-        }
-
-        List<String> keys = new ArrayList<>((int) Math.min(size, Integer.MAX_VALUE));
-        inorder(rootOffset, keys);
-        return keys.toArray(new String[0]);
-    }
-
-    // b tree stuff
-
-    /** Recursive search starting from a node already in memory. */
-    private TreeObject searchRecursive(BTreeNode node, String key) throws IOException {
-        int i = 0;
-
-        while (i < node.numKeys && key.compareTo(node.keys[i].getKey()) > 0) {
-            i++;
-        }
-
-        if (i < node.numKeys && key.equals(node.keys[i].getKey())) {
-            return node.keys[i];
-        }
-
-        if (node.isLeaf) {
-            return null;
-        }
-
-        long childOffset = node.children[i];
-        if (childOffset < 0) {
-            return null;
-        }
-
-        BTreeNode child = diskRead(childOffset);
-        return searchRecursive(child, key);
-    }
-
-    /**
-     * Insert a key into a node that is guaranteed NOT to be full.
-     * Returns true if a new distinct key was inserted, false if a duplicate
-     * was found and its count was incremented.
-     */
+    // Insert into a non-full node
     private boolean insertNonFull(BTreeNode node, TreeObject obj) throws IOException {
         String key = obj.getKey();
 
@@ -291,9 +135,8 @@ public class BTree implements BTreeInterface {
                     node.keys[i].incCount();
                     diskWrite(node);
                     return false;
-                } else if (cmp > 0) {
-                    break;
-                }
+                } else if (cmp > 0) break;
+
                 node.keys[i + 1] = node.keys[i];
                 i--;
             }
@@ -302,83 +145,85 @@ public class BTree implements BTreeInterface {
             node.numKeys++;
             diskWrite(node);
             return true;
+        }
 
-        } else {
-            int i = node.numKeys - 1;
-            while (i >= 0 && key.compareTo(node.keys[i].getKey()) < 0) {
-                i--;
-            }
+        // Internal node
+        int i = node.numKeys - 1;
+        while (i >= 0 && key.compareTo(node.keys[i].getKey()) < 0) i--;
 
-            if (i >= 0 && key.equals(node.keys[i].getKey())) {
-                node.keys[i].incCount();
+        if (i >= 0 && key.equals(node.keys[i].getKey())) {
+            node.keys[i].incCount();
+            diskWrite(node);
+            return false;
+        }
+
+        int childIndex = i + 1;
+        BTreeNode child = diskRead(node.children[childIndex]);
+
+        if (child.numKeys == maxKeys) {
+            splitChild(node, childIndex);
+
+            int cmpMid = key.compareTo(node.keys[childIndex].getKey());
+            if (cmpMid == 0) {
+                node.keys[childIndex].incCount();
                 diskWrite(node);
                 return false;
+            } else if (cmpMid > 0) {
+                childIndex++;
             }
 
-            int childIndex = i + 1;
-            long childOffset = node.children[childIndex];
-            BTreeNode child = diskRead(childOffset);
-
-            if (child.numKeys == maxKeys) {
-                splitChild(node, childIndex);
-
-                int cmpMid = key.compareTo(node.keys[childIndex].getKey());
-                if (cmpMid == 0) {
-                    node.keys[childIndex].incCount();
-                    diskWrite(node);
-                    return false;
-                } else if (cmpMid > 0) {
-                    childIndex++;
-                }
-
-                childOffset = node.children[childIndex];
-                child = diskRead(childOffset);
-            }
-
-            boolean inserted = insertNonFull(child, obj);
-            diskWrite(child);
-            return inserted;
+            child = diskRead(node.children[childIndex]);
         }
+
+        boolean inserted = insertNonFull(child, obj);
+        diskWrite(child);
+        return inserted;
     }
 
-    /**
-     * Split the full child node at parent.children[index].
-     * Parent is not full when this is called.
-     */
+
+    // Split child
+
+
     private void splitChild(BTreeNode parent, int index) throws IOException {
-        long childOffset = parent.children[index];
-        BTreeNode y = diskRead(childOffset);        // full child
-        BTreeNode z = new BTreeNode(y.isLeaf);      // new sibling
+        BTreeNode y = diskRead(parent.children[index]);
+        BTreeNode z = new BTreeNode(y.isLeaf);
 
         z.offset = nextFreeOffset;
         nextFreeOffset += nodeSize;
         nodeCount++;
 
-        z.numKeys = degree - 1;
-        for (int j = 0; j < degree - 1; j++) {
-            z.keys[j] = y.keys[j + degree];
+        int t = degree;
+
+        // Move keys to z
+        z.numKeys = t - 1;
+        for (int j = 0; j < t - 1; j++) {
+            z.keys[j] = y.keys[j + t];
+            y.keys[j + t] = null;
         }
 
+        // Move children if internal
         if (!y.isLeaf) {
-            for (int j = 0; j < degree; j++) {
-                z.children[j] = y.children[j + degree];
-                y.children[j + degree] = -1L;
+            for (int j = 0; j < t; j++) {
+                z.children[j] = y.children[j + t];
+                y.children[j + t] = -1L;
             }
         }
 
-        y.numKeys = degree - 1;
+        TreeObject midKey = y.keys[t - 1];
+        y.keys[t - 1] = null;
+        y.numKeys = t - 1;
 
+        // Shift children
         for (int j = parent.numKeys; j >= index + 1; j--) {
             parent.children[j + 1] = parent.children[j];
         }
         parent.children[index + 1] = z.offset;
 
+        // Shift keys
         for (int j = parent.numKeys - 1; j >= index; j--) {
             parent.keys[j + 1] = parent.keys[j];
         }
-
-        parent.keys[index] = y.keys[degree - 1];
-        y.keys[degree - 1] = null;
+        parent.keys[index] = midKey;
 
         parent.numKeys++;
 
@@ -388,138 +233,168 @@ public class BTree implements BTreeInterface {
         writeMetadata();
     }
 
-    
-    // In-order traversal helpers
-    
 
-    private void inorder(long nodeOffset, List<String> out) throws IOException {
-        if (nodeOffset < 0) return;
+    // Search
 
-        BTreeNode node = diskRead(nodeOffset);
 
-        int i;
-        for (i = 0; i < node.numKeys; i++) {
-            if (!node.isLeaf) {
-                long childOffset = node.children[i];
-                if (childOffset >= 0) {
-                    inorder(childOffset, out);
-                }
-            }
-            out.add(node.keys[i].getKey());
-        }
-
-        if (!node.isLeaf) {
-            long lastChild = node.children[i];
-            if (lastChild >= 0) {
-                inorder(lastChild, out);
-            }
-        }
+    public TreeObject search(String key) throws IOException {
+        if (key == null || root == null) return null;
+        return searchRecursive(root, key);
     }
 
-    private void dumpInorderToWriter(long nodeOffset, PrintWriter out) throws IOException {
-        if (nodeOffset < 0) return;
+    private TreeObject searchRecursive(BTreeNode node, String key) throws IOException {
+        int i = 0;
+        while (i < node.numKeys && key.compareTo(node.keys[i].getKey()) > 0) i++;
 
-        BTreeNode node = diskRead(nodeOffset);
+        if (i < node.numKeys && key.equals(node.keys[i].getKey()))
+            return node.keys[i];
+
+        if (node.isLeaf) return null;
+
+        long child = node.children[i];
+        if (child < 0) return null;
+
+        return searchRecursive(diskRead(child), key);
+    }
+
+
+    // Dumping
+
+
+    public void dumpToFile(PrintWriter out) throws IOException {
+        if (out == null || size == 0) return;
+        dumpInorderToWriter(rootOffset, out);
+    }
+
+    private void dumpInorderToWriter(long offset, PrintWriter out) throws IOException {
+        if (offset < 0) return;
+
+        BTreeNode node = diskRead(offset);
 
         int i;
         for (i = 0; i < node.numKeys; i++) {
-            if (!node.isLeaf) {
-                long childOffset = node.children[i];
-                if (childOffset >= 0) {
-                    dumpInorderToWriter(childOffset, out);
-                }
-            }
+            if (node.children[i] >= 0)
+                dumpInorderToWriter(node.children[i], out);
+
             TreeObject t = node.keys[i];
             out.println(t.getKey() + " " + t.getCount());
         }
 
-        if (!node.isLeaf) {
-            long lastChild = node.children[i];
-            if (lastChild >= 0) {
-                dumpInorderToWriter(lastChild, out);
-            }
+        if (node.children[i] >= 0)
+            dumpInorderToWriter(node.children[i], out);
+    }
+
+    public void dumpToDatabase(String dbName, String tableName) throws IOException {
+        if (dbName == null || tableName == null || size == 0) return;
+
+        Connection conn = null;
+        Statement stmt = null;
+        PreparedStatement ps = null;
+
+        try {
+            conn = DriverManager.getConnection("jdbc:sqlite:" + dbName);
+            conn.setAutoCommit(false);
+
+            stmt = conn.createStatement();
+            stmt.executeUpdate("DROP TABLE IF EXISTS " + tableName);
+            stmt.executeUpdate(
+                "CREATE TABLE " + tableName +
+                " (key TEXT NOT NULL, frequency INTEGER NOT NULL)"
+            );
+
+            ps = conn.prepareStatement(
+                "INSERT INTO " + tableName + " (key, frequency) VALUES (?, ?)"
+            );
+
+            dumpInorderToDatabase(rootOffset, ps);
+            conn.commit();
+
+        } catch (SQLException e) {
+            try { if (conn != null) conn.rollback(); } catch (SQLException ignore) {}
+            throw new IOException("Error writing database: " + e.getMessage());
+        } finally {
+            try { if (ps != null) ps.close(); } catch (SQLException ignore) {}
+            try { if (stmt != null) stmt.close(); } catch (SQLException ignore) {}
+            try { if (conn != null) conn.close(); } catch (SQLException ignore) {}
         }
     }
 
-    private void dumpInorderToDatabase(long nodeOffset, PreparedStatement ps) throws IOException, SQLException {
-        if (nodeOffset < 0) return;
+    private void dumpInorderToDatabase(long offset, PreparedStatement ps)
+            throws IOException, SQLException {
 
-        BTreeNode node = diskRead(nodeOffset);
+        if (offset < 0) return;
+        BTreeNode node = diskRead(offset);
 
         int i;
         for (i = 0; i < node.numKeys; i++) {
-            if (!node.isLeaf) {
-                long childOffset = node.children[i];
-                if (childOffset >= 0) {
-                    dumpInorderToDatabase(childOffset, ps);
-                }
-            }
+            if (node.children[i] >= 0)
+                dumpInorderToDatabase(node.children[i], ps);
+
             TreeObject t = node.keys[i];
             ps.setString(1, t.getKey());
             ps.setLong(2, t.getCount());
             ps.addBatch();
         }
 
-        if (!node.isLeaf) {
-            long lastChild = node.children[i];
-            if (lastChild >= 0) {
-                dumpInorderToDatabase(lastChild, ps);
-            }
-        }
+        if (node.children[i] >= 0)
+            dumpInorderToDatabase(node.children[i], ps);
 
-        // Execute batches occasionally to avoid huge memory spikes
         ps.executeBatch();
     }
 
 
-    /** Compute bytes required for storing one node on disk. */
-    private int computeNodeSize() {
+    // Sorted array for tests
 
-        int headerSize = 1 + 4;  // boolean isLeaf, int numKeys
 
-        int keyRecordSize = 64 + 8; // 64-byte padded key + 8 byte count
-        int keysSectionSize = maxKeys * keyRecordSize;
+    public String[] getSortedKeyArray() throws IOException {
+        if (size == 0) return new String[0];
 
-        int childrenSectionSize = maxChildren * Long.BYTES;
+        List<String> keys = new ArrayList<>((int) Math.min(size, Integer.MAX_VALUE));
+        inorder(rootOffset, keys);
+        return keys.toArray(new String[0]);
+    }
 
-        int baseSize = headerSize + keysSectionSize + childrenSectionSize;
+    private void inorder(long offset, List<String> out) throws IOException {
+        if (offset < 0) return;
 
-        // Pad to next 4096-byte block
-        int block = 4096;
-        int padding = (block - (baseSize % block)) % block;
+        BTreeNode node = diskRead(offset);
 
-        return baseSize + padding;
+        int i;
+        for (i = 0; i < node.numKeys; i++) {
+            if (node.children[i] >= 0)
+                inorder(node.children[i], out);
+
+            out.add(node.keys[i].getKey());
+        }
+
+        if (node.children[i] >= 0)
+            inorder(node.children[i], out);
     }
 
 
-    /**
-     * Calculate optimal degree such that a node fits into a 4096-byte block
-     * as full as possible given the TreeObject.BYTES and child pointer size.
-     */
-    private int calculateOptimalDegree() {
-        int best = 2; // minimum allowed
+    // Disk I/O
 
+
+    private int computeNodeSize() {
+        int header = 1 + 4;
+        int keys = maxKeys * (KEY_BYTES + 8);
+        int children = maxChildren * Long.BYTES;
+        return header + keys + children;
+    }
+
+    private int calculateOptimalDegree() {
+        int best = 2;
         for (int t = 2; t < 1000; t++) {
             int mk = 2 * t - 1;
             int mc = 2 * t;
 
-            int headerSize = 1 + 4;          // isLeaf + numKeys
-            int keyRecordSize = 64 + 8;      // key bytes + count
-            int keysSectionSize = mk * keyRecordSize;
-            int childrenSectionSize = mc * Long.BYTES;
-
-            int baseSize = headerSize + keysSectionSize + childrenSectionSize;
-
-            if (baseSize > BLOCK_SIZE) {
-                break;
-            }
-
+            int size = (1 + 4) + mk * (KEY_BYTES + 8) + mc * Long.BYTES;
+            if (size > 4096) break;
             best = t;
         }
-
         return best;
-}
-    // Write metadata at the beginning of the file. 
+    }
+
     private void writeMetadata() throws IOException {
         file.seek(0);
         file.writeLong(rootOffset);
@@ -529,7 +404,6 @@ public class BTree implements BTreeInterface {
         file.writeLong(size);
         file.writeInt(height);
     }
-
 
     public BTreeNode diskRead(long offset) throws IOException {
         file.seek(offset);
@@ -542,13 +416,13 @@ public class BTree implements BTreeInterface {
         node.numKeys = numKeys;
 
         for (int i = 0; i < maxKeys; i++) {
-            byte[] keyBytes = new byte[64];
+            byte[] keyBytes = new byte[KEY_BYTES];
             file.readFully(keyBytes);
             long count = file.readLong();
 
             if (i < numKeys && count > 0) {
                 int len = 0;
-                while (len < 64 && keyBytes[len] != 0) len++;
+                while (len < KEY_BYTES && keyBytes[len] != 0) len++;
                 String key = new String(keyBytes, 0, len, StandardCharsets.UTF_8);
                 node.keys[i] = new TreeObject(key, count);
             } else {
@@ -556,89 +430,71 @@ public class BTree implements BTreeInterface {
             }
         }
 
-        for (int i = 0; i < maxChildren; i++) {
-            long child = file.readLong();
-            node.children[i] = child;
-        }
+        for (int i = 0; i < maxChildren; i++)
+            node.children[i] = file.readLong();
 
         return node;
     }
 
-
-    /** Write a BTreeNode to disk at its offset. */
     public void diskWrite(BTreeNode node) throws IOException {
         file.seek(node.offset);
 
-        // Write header
         file.writeBoolean(node.isLeaf);
         file.writeInt(node.numKeys);
 
-        // Write fixed-length key entries
         for (int i = 0; i < maxKeys; i++) {
             if (i < node.numKeys && node.keys[i] != null) {
                 byte[] keyBytes = node.keys[i].getKey().getBytes(StandardCharsets.UTF_8);
-                byte[] buf = new byte[64];
-                int len = Math.min(keyBytes.length, buf.length);
-                System.arraycopy(keyBytes, 0, buf, 0, len);
+                byte[] buf = new byte[KEY_BYTES];
+                System.arraycopy(keyBytes, 0, buf, 0, Math.min(keyBytes.length, KEY_BYTES));
                 file.write(buf);
                 file.writeLong(node.keys[i].getCount());
             } else {
-                // write empty record
-                file.write(new byte[64]);
+                file.write(new byte[KEY_BYTES]);
                 file.writeLong(0L);
             }
         }
 
-        // Write children offsets (always fixed count)
-        for (int i = 0; i < maxChildren; i++) {
-            long child = (node.children[i] >= 0 ? node.children[i] : -1L);
-            file.writeLong(child);
-        }
-
-        // Pad to full nodeSize
-        long written = file.getFilePointer() - node.offset;
-        long padding = nodeSize - written;
-        for (long i = 0; i < padding; i++) {
-            file.writeByte(0);
-        }
+        for (int i = 0; i < maxChildren; i++)
+            file.writeLong(node.children[i]);
     }
 
 
-    // ---------------------------------------------------------------
-    // Inner node class
-    // ---------------------------------------------------------------
+    // Inner Node class
 
-    /** Inner BTreeNode class representing a node stored on disk. */
+
     private class BTreeNode {
         boolean isLeaf;
         int numKeys;
         TreeObject[] keys;
         long[] children;
-        long offset; // disk offset
+        long offset;
 
         BTreeNode(boolean isLeaf) {
             this.isLeaf = isLeaf;
             this.numKeys = 0;
             this.keys = new TreeObject[maxKeys];
             this.children = new long[maxChildren];
-            for (int i = 0; i < maxChildren; i++) {
-                this.children[i] = -1L;
-            }
+            for (int i = 0; i < maxChildren; i++)
+                children[i] = -1L;
         }
     }
 
-    // ---------------------------------------------------------------
-    // Optional: close method
-    // ---------------------------------------------------------------
+ 
+    // Close file
 
-    /**
-     * Flush metadata and close the underlying file.
-     */
+
     public void close() throws IOException {
         if (file != null) {
             writeMetadata();
             file.close();
             file = null;
         }
+    }
+
+    @Override
+    public void delete(String key) {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'delete'");
     }
 }
